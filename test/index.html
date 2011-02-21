@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html><head>
+  <title>MetaScript</title>
+  <script type="text/javascript" src="js/jquery-1.4.2.min.js"></script>
+  <script type="text/javascript" src="../metascript.js"></script>
+  <style type="text/css">
+    body {
+      background-color: #f8f8f8;
+      color: black;
+    }
+    #source, #output, pre {
+      font-family: Consolas,monospace;
+      font-size: 1em;
+    }
+    #source, #output {
+      vertical-align: top;
+      display: block;
+      width: 100%;
+      border: 1px solid #c0c0c0;
+      min-height: 10em;
+      background-color: #f0f0f0;
+      padding: 0.5em;
+      margin: 0.5em 0;
+      box-sizing: border-box;
+      -webkit-box-sizing:border-box;
+      -moz-box-sizing: border-box;
+    }
+    #pretty, #ast {
+      background-color: white;
+      border: 1px solid #c0c0c0;
+      padding: 0.5em;
+      margin: 0.5em 0;
+    }
+    #ast ul {
+      padding-left: 2em;
+    }
+    .pretty_c { color: #808080; }
+    .pretty_t_string, .pretty_t_mstring { color: #008000; font-weight: bold; }
+    .pretty_t_keyword { color: #000080; font-weight: bold; }
+    .pretty_t_ident, .pretty_t_qident { color: #800080; font-weight: bold; }
+    .pretty_t_decimal, .pretty_t_hex { color: #0000ff; }
+    .pretty_s_semi { background-color: #e0ffe0; }
+  </style>
+</head><body>
+
+<textarea id="source">
+
+1 = 2 == 3 === 4 &lt;= 5 >= 6 != 7 !!= 8 !== 9 ! 10 ~~ 11 %: 12 :: 13 : 14
+
+/*
+function f() {
+  a
+  b
+    b2
+    b3
+  function g() {
+    c
+      c1
+  }
+  function h() { i }
+  e
+    e1
+      e2 {
+        k
+        l
+      }
+      e3
+  if(m) n
+  else { o
+           o1
+    p }
+  j
+}*/
+
+/* Hello, &lt;
+   World */
+
+/*
+var s1 = "foo\"b ar", s2 = """multi
+  line"""
+def f(x) = x+1;
+*/
+</textarea>
+
+<button id="prettyprint">Pretty-Print</button>
+<button id="showast">Show AST</button>
+
+<textarea id="output"></textarea>
+
+<pre id="pretty"></pre>
+
+<div id="ast"></pre>
+
+<script type="text/javascript">
+  var ms = MetaScriptFactory();
+  if(window.console) ms.log = function(msg) { window.console.log(msg); };
+
+  function compile(opts) {
+    opts = opts || {};
+    ms.log("Tokenizing...");
+    var source = $("#source").attr("value");
+    var start = ms.tokenize(source);
+    ms.log(start);
+    ms.log(start.showAll());
+    ms.log(start.showAll(true));
+    if(start.error) ms.log("Tokenization error: " + start.error + "; Rest: " + start.rest);
+    else {
+      ms.log("Inserting virtual semicolons...");
+      start = ms.insertVirtualSemicolons(start);
+      if(start.error) ms.log("Layout error: " + start.error + "; Rest: " + start.rest);
+      else {
+        ms.log(start);
+        if(opts.pretty) $("#pretty").html(start.toPrettyHTML({ vsemi: true }));
+        ms.log("Parsing...");
+        var ast = ms.unit(start);
+        ms.log(ast);
+        if(ast instanceof ms.Success) {
+          if(opts.ast) $("#ast").html(ast.val.toPrettyHTML());
+        }
+      }
+    }
+    ms.log("Finished");
+  };
+
+  function print(msg) { $("#output").append(msg); }
+  function println(msg) { print(msg+"\r\n"); }
+
+  $(function() {
+    $("#prettyprint").click(function() { compile({ pretty: true }); });
+    $("#showast").click(function() { compile({ ast: true }); });
+    compile({ pretty: true, ast: true });
+  });
+</script>
+
+</body></html>
