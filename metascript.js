@@ -274,6 +274,12 @@ function trn(p, f) { return function(input) {
   return new Success(new f(r.val), r.rest);
 }}
 
+function trv(p, v) { return function(input) {
+  var r = p(input);
+  if(r instanceof Error) return r;
+  return new Success(v, r.rest);
+}}
+
 function sep(p, q) { return function(input) {
   var r = p(input);
   if(r instanceof Error) return r;
@@ -285,8 +291,8 @@ function sep(p, q) { return function(input) {
     var r3 = p(r2.rest);
     if(r3 instanceof Error) break;
     input = r3.rest;
-    res.push(r2.val);
-    res.push(r3.val);
+    if(r2.val !== null) res.push(r2.val);
+    if(r3.val !== null) res.push(r3.val);
   }
   return new Success(res, input);
 }}
@@ -320,7 +326,7 @@ function insertVirtualSemicolons(input) {
       var sc = scopes.pop();
       if(sc.text === "[") return new Error("No closing ] for opening [", sc);
       if(sc.text === "{") return new Error("No closing } for opening {", sc);
-    } else if(t.n === "w_lf" && scopes[scopes.length-1].text === "{") {
+    } else if(t.n === "w_lf" && (scopes[scopes.length-1].text === "{" || scopes[scopes.length-1].n === "s_start")) {
       var indent = scopes[scopes.length-1].scopeIndent;
       var ntt = t.nextT.text;
       if( t.nextT.n !== "s_end" && ntt !== "else" && ntt !== ";" && ntt !== "{" && ntt !== "}"
@@ -350,8 +356,8 @@ ASTNode.prototype.toPrettyHTML = function() {
   var s = "<ul>";
   function f(n, depth) {
     var i = n.getNodeInfo ? n.getNodeInfo() : [n.toString()];
-    s += "<li>" + i[0];
-    if(i[1]) s += ": " + i[1].replace(/</g, "&lt;");
+    s += (n.getNodeInfo ? "<li>" : "<li class=\"other\">") + i[0];
+    if(i[1]) s += ": <span class=\"value\">" + i[1].replace(/</g, "&lt;") + "</span>";
     if(i[2]) {
       s += "<ul>";
       for(var j=0; j<i[2].length; j++)
@@ -363,6 +369,15 @@ ASTNode.prototype.toPrettyHTML = function() {
   f(this, 0);
   return s + "</ul>";
 };
+
+function ASTSourceElements(children) {
+  this.children = children;
+}
+ASTSourceElements.prototype = new ASTNode("SourceElements");
+ASTSourceElements.create = function(children) {
+  if(children.length === 1) return children[0];
+  else return new ASTSourceElements(children);
+}
 
 function ASTOp(children) {
   this.children = children;
@@ -385,18 +400,71 @@ function ASTDecimal(token) {
 }
 ASTDecimal.prototype = new ASTLiteral("Decimal");
 
+function ASTHex(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTHex.prototype = new ASTLiteral("Hex");
+
+function ASTBoolean(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTBoolean.prototype = new ASTLiteral("Boolean");
+
+function ASTNull(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTNull.prototype = new ASTNull("Null");
+
+function ASTThis(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTThis.prototype = new ASTThis("This");
+
+function ASTString(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTString.prototype = new ASTLiteral("String");
+
+function ASTMString(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTMString.prototype = new ASTLiteral("MString");
+
+function ASTIdent(token) {
+  this.token = token;
+  this.value = token.text;
+}
+ASTIdent.prototype = new ASTNode("Ident");
+ASTIdent.prototype.getNodeInfo = function() {
+  return ["AST" + this.nodeName, this.value];
+}
+
 
 ///////////////////////////////////////////////////////////////////// Parser
 
 var expr = function(i) { return expr(i); }
 var assign = function(i) { return assign(i); }
 
-var decimal = trn(tn("t_decimal"), ASTDecimal);
-var literal = choice(tn("t_string"), tn("t_mstring"), tn("t_hex"), decimal, tt("true"), tt("false"));
-//var product = trn(seq(literal, rep(seq(tt("*"), literal))), ASTOp);
-//var sum = trn(seq(product, rep(seq(tn("t_op", /^[\+\-]$/), product))), ASTOp);
-//var sum = chainl(product, tt("+", function(t) { return function(a,b) { return new ASTOp([t, a, b]); } }));
-var infix9 = tr(sep(literal, tn("t_op9")), ASTOp.create);
+var primaryExpr = choice(
+  trn(tt("this"), ASTThis),
+  trn(tt("null"), ASTNull),
+  trn(choice(tt("true"), tt("false")), ASTBoolean),
+  trn(tn("t_ident"), ASTIdent),
+  trn(tn("t_decimal"), ASTDecimal),
+  trn(tn("t_hex"), ASTDecimal),
+  trn(tn("t_string"), ASTString),
+  trn(tn("t_mstring"), ASTMString),
+  //-- array literal,
+  //-- object literal,
+  seq(tt("("), ">", expr, "<*", tt(")")) );
+
+var infix9 = tr(sep(primaryExpr, tn("t_op9")), ASTOp.create);
 var infix8 = tr(sep(infix9, tn("t_op8")), ASTOp.create);
 var infix7 = tr(sep(infix8, tn("t_op7")), ASTOp.create);
 var infix6 = tr(sep(infix7, tn("t_op6")), ASTOp.create);
@@ -408,7 +476,56 @@ var infix1 = tr(sep(infix2, tn("t_op1")), ASTOp.create);
 var cond = choice(tr(seq(infix1, tt("?"), assign, tt(":"), assign), ASTOp.create), infix1);
 var assign = tr(sep(infix1, tn("t_assignop")), ASTOp.create);
 var expr = assign;
-var unit = seq(tn("s_start"), ">", expr, "<*", tn("s_end"));
+var statement = expr; //--
+var sourceElement = statement; //-- choice(statement, definition);
+var statementSeparator = choice(tn("t_semi", null), tn("s_semi", null));
+var sourceElements = tr(seq(rep(statementSeparator, 0), ">",
+  sep(sourceElement, trv(rep(statementSeparator, 1), null)),
+  "<*", opt(rep(statementSeparator, 0))), ASTSourceElements.create);
+var program = seq(tn("s_start"), ">", sourceElements, "<*", tn("s_end"));
+
+
+/**
+ * Perform some or all of the compilation phases.
+ *
+ * @param input The source code to compile (string)
+ * @param opts Compiler options (object):
+ *   - semi (boolean): Insert virtual semicolons
+ *   - ast (boolean): Build AST (implies semi)
+ * @return An object with the results:
+ *   - errors: An array of errors. May include:
+ *       - Token objects with .error message and .rest
+ *       - Error objects
+ *   - start: The start token after successful tokenization
+ *       (may contain only some of the virtual semicolons if an error occurs
+ *       while inferring semicolons)
+ *   - ast: The AST
+ */
+function compile(input, opts) {
+  opts = opts || {};
+  var result = { errors: [] };
+  log("Tokenizing input...");
+  var start = tokenize(input);
+  if(start.error) result.errors.push(start);
+  else {
+    result.start = start;
+    if(opts.semi || opts.ast) {
+      log("Inserting virtual semicolons...");
+      var semiInsert = insertVirtualSemicolons(start);
+      if(semiInsert instanceof Error) result.errors.push(semiInsert);
+      else {
+        log("Parsing...");
+        var ast = program(start);
+        if(ast instanceof Error) result.errors.push(ast);
+        else {
+          result.ast = ast.val;
+        }
+      }
+    }
+  }
+  log("Finished compiling");
+  return result;
+}
 
 ms = {
   log: function(msg) {},
@@ -417,7 +534,8 @@ ms = {
   Success: Success,
   Error: Error,
   insertVirtualSemicolons: insertVirtualSemicolons,
-  unit: unit //--
+  program: program,
+  compile: compile
 };
 return ms;
 

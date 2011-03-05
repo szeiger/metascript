@@ -7,6 +7,7 @@
     body {
       background-color: #f8f8f8;
       color: black;
+      font-family: Segoe UI, Arial, sans-serif;
     }
     #source, #output, pre {
       font-family: Consolas,monospace;
@@ -34,6 +35,12 @@
     #ast ul {
       padding-left: 2em;
     }
+    #ast li.other {
+      color: #808080;
+    }
+    #ast span.value {
+      font-weight: bold;
+    }
     .pretty_c { color: #808080; }
     .pretty_t_string, .pretty_t_mstring { color: #008000; font-weight: bold; }
     .pretty_t_keyword { color: #000080; font-weight: bold; }
@@ -45,6 +52,7 @@
 
 <textarea id="source">
 
+a + b
 1 = 2 == 3 === 4 &lt;= 5 >= 6 != 7 !!= 8 !== 9 ! 10 ~~ 11 %: 12 :: 13 : 14
 
 /*
@@ -89,46 +97,38 @@ def f(x) = x+1;
 
 <pre id="pretty"></pre>
 
-<div id="ast"></pre>
+<div id="ast"></div>
 
 <script type="text/javascript">
   var ms = MetaScriptFactory();
   if(window.console) ms.log = function(msg) { window.console.log(msg); };
 
-  function compile(opts) {
-    opts = opts || {};
-    ms.log("Tokenizing...");
+  function process(opts) {
     var source = $("#source").attr("value");
-    var start = ms.tokenize(source);
-    ms.log(start);
-    ms.log(start.showAll());
-    ms.log(start.showAll(true));
-    if(start.error) ms.log("Tokenization error: " + start.error + "; Rest: " + start.rest);
-    else {
-      ms.log("Inserting virtual semicolons...");
-      start = ms.insertVirtualSemicolons(start);
-      if(start.error) ms.log("Layout error: " + start.error + "; Rest: " + start.rest);
-      else {
-        ms.log(start);
-        if(opts.pretty) $("#pretty").html(start.toPrettyHTML({ vsemi: true }));
-        ms.log("Parsing...");
-        var ast = ms.unit(start);
-        ms.log(ast);
-        if(ast instanceof ms.Success) {
-          if(opts.ast) $("#ast").html(ast.val.toPrettyHTML());
-        }
-      }
+    var result = ms.compile(source, opts);
+    if(result.errors) {
+      for(var i=0; i<result.errors.length; i++)
+        ms.log("Error: " + result.errors[i]);
     }
-    ms.log("Finished");
+    if(result.start) {
+      ms.log(result.start);
+      ms.log("All tokens: " + result.start.showAll());
+      ms.log("Grammar tokens: " + result.start.showAll(true));
+      if(opts.pretty) $("#pretty").html(result.start.toPrettyHTML({ vsemi: true }));
+    }
+    if(result.ast) {
+      ms.log(result.ast);
+      if(opts.ast) $("#ast").html(result.ast.toPrettyHTML());
+    }
   };
 
   function print(msg) { $("#output").append(msg); }
   function println(msg) { print(msg+"\r\n"); }
 
   $(function() {
-    $("#prettyprint").click(function() { compile({ pretty: true }); });
-    $("#showast").click(function() { compile({ ast: true }); });
-    compile({ pretty: true, ast: true });
+    $("#prettyprint").click(function() { process({ pretty: true }); });
+    $("#showast").click(function() { process({ ast: true }); });
+    process({ pretty: true, ast: true });
   });
 </script>
 
