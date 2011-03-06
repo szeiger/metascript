@@ -5,16 +5,18 @@ var undefined, ms;
 function log(msg) { ms.log(msg); };
 
 
-///////////////////////////////////////////////////////////////////// Tokens
+///////////////////////////////////////////////////////////////////// Lexer
 
 function Token(text, rule) {
   this.text = text;
   this.c = rule.n.charAt(0);
   this.n = rule.n;
 }
+
 Token.prototype.toString = function() {
   return this.c === "t" ? this.n + " \"" + this.text + "\"" : this.n;
 };
+
 Token.prototype.showAll = function(onlyT) {
   var t = this;
   var s = "";
@@ -28,6 +30,7 @@ Token.prototype.showAll = function(onlyT) {
   }
   return s;
 };
+
 Token.prototype.toPrettyHTML = function(opts) {
   opts = opts || {};
   for(var t = this, s = ""; t; t = t.next) {
@@ -37,7 +40,9 @@ Token.prototype.toPrettyHTML = function(opts) {
   }
   return s;
 };
+
 Token.prototype.isT = function() { return this.c === "t" || this.c === "s"; }
+
 Token.prototype.append = function(t) {
   t.next = this.next;
   t.nextT = this.nextT;
@@ -58,6 +63,7 @@ Token.prototype.append = function(t) {
   this.next = t;
   if(t.isT()) this.nextT = t;
 };
+
 Token.newStart = function() {
   var t = new Token("", { n: "s_start" });
   t.line = 0;
@@ -65,11 +71,235 @@ Token.newStart = function() {
   t.offset = 0;
   return t;
 };
+
 Token.newEnd = function() { return new Token("", { n: "s_end" }); };
+
 Token.newVSemi = function() { return new Token(";", { n: "s_semi" }); };
 
+Token.tokenize = function(text, rules) {
+  var start = Token.newStart(), prevT = start, prev = prevT;
+  var line = 0, col = 0, offset = 0;
+  function push(t) {
+    t.line = line;
+    t.col = col;
+    t.offset = offset;
+    offset += t.text.length;
+    var lfmatches = t.text.match(/\r\n|\r|\n/g);
+    if(lfmatches) {
+      line += lfmatches.length;
+      var lastmatch = lfmatches[lfmatches.length-1];
+      col = t.text.length - t.text.lastIndexOf(lastmatch) - lastmatch.length;
+    }
+    else col += t.text.length;
+    t.prevT = prevT;
+    t.prev = prev;
+    prev.next = t;
+    prev = t;
+    if(t.c === "t" || t.c === "s") prevT = t;
+  }
+  function classify(text, rule) {
+    if(rule.classify) {
+      for(var i=0; i<rule.classify.length; i++) {
+        if(text.match(rule.classify[i].r))
+          return classify(text, rule.classify[i]);
+      }
+    }
+    return new Token(text, rule);
+  }
+  loop: while(text.length > 0) {
+    for(var i=0; i<rules.length; i++) {
+      var matches = text.match(rules[i].r);
+      if(matches && matches[0].length > 0) {
+        push(classify(matches[0], rules[i]));
+        text = text.substring(matches[0].length);
+        continue loop;
+      }
+    }
+    start.error = "No token recognized";
+    start.rest = text;
+    break;
+  }
+  if(!start.error) push(Token.newEnd());
+  var nextT = prev, cur = nextT.prev;
+  while(true) {
+    cur.nextT = nextT;
+    if(cur.n === "s_start") break;
+    if(cur.c === "t" || cur.c === "s") nextT = cur;
+    cur = cur.prev;
+  }
+  return start;
+}
 
-///////////////////////////////////////////////////////////////////// Lexer
+
+///////////////////////////////////////////////////////////////////// Parser Combinators
+
+function Success(val, rest) { this.val = val; this.rest = rest; };
+Success.prototype.toString = function() {
+  return "Success(" + this.val + " ;; " + this.rest + ")";
+};
+
+function Error(msg, rest) { this.msg = msg; this.rest = rest; };
+Error.prototype.toString = function() {
+  return "Error(" + this.msg + ", " + this.rest + ")";
+};
+
+function Parser(p) { this.parse = p; };
+
+Parser.rec = function(f) { return new Parser(function(i) { return f().parse(i); }); }
+
+Parser.choice = function() { var parsers = arguments; return new Parser(function(input) {
+  var r;
+  for(var i=0; i<parsers.length; i++) {
+    r = parsers[i].parse(input);
+    if(r instanceof Success) return r;
+  }
+  return r;
+})}
+
+Parser.result = function(v) { return new Parser(function(input) {
+  return new Success(v, input);
+})}
+
+Parser.zero = function(msg) { return new Parser(function(input) {
+  return new Error(msg, input);
+})}
+
+Parser.seq = function() { var parsers = arguments; return new Parser(function(input) {
+  var res = [];
+  for(var i=0; i<parsers.length; i++) {
+    var p = parsers[i];
+    var r = p.parse(input);
+    if(r instanceof Error) return r;
+    if(r.val !== null) res.push(r.val);
+    input = r.rest;
+  }
+  return new Success(res, input);
+})}
+
+Parser.prototype.opt = function(otherwise) { var p = this; return new Parser(function(input) {
+  var undefined;
+  var r = p.parse(input);
+  return (r instanceof Error) ? new Success(otherwise === undefined ? null : otherwise, input) : r;
+})}
+
+Parser.prototype.rep = function(min) { var p = this; return new Parser(function(input) {
+  var res = [];
+  while(true) {
+    var r = p.parse(input);
+    if(r instanceof Error) {
+      if(min && res.length < min) return r;
+      else return new Success(res, input);
+    }
+    res.push(r.val);
+    input = r.rest;
+  }
+})}
+
+Parser.prototype.or = function(q) { return Parser.choice(this, q); }
+
+Parser.prototype.sep = function(q) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  input = r.rest;
+  var res = [];
+  if(r.val !== null) res.push(r.val);
+  while(true) {
+    var r2 = q.parse(input);
+    if(r2 instanceof Error) break;
+    var r3 = p.parse(r2.rest);
+    if(r3 instanceof Error) break;
+    input = r3.rest;
+    if(r2.val !== null) res.push(r2.val);
+    if(r3.val !== null) res.push(r3.val);
+  }
+  return new Success(res, input);
+})}
+
+Parser.prototype.chainl = function(q) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  input = r.rest;
+  while(true) {
+    var r2 = q.parse(input);
+    if(r2 instanceof Error) return r;
+    var r3 = p.parse(r2.rest);
+    if(r3 instanceof Error) return r;
+    input = r3.rest;
+    r = new Success(r2.val(r.val, r3.val), input);
+  }
+})}
+
+Parser.prototype.bind = function(f) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  return f(r.val).parse(r.rest);
+})}
+
+Parser.prototype.map = function(f) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  return new Success(f(r.val), r.rest);
+})}
+
+Parser.prototype.mapn = function(f) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  return new Success(new f(r.val), r.rest);
+})}
+
+Parser.prototype.mapv = function(v) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  return new Success(v, r.rest);
+})}
+
+Parser.prototype.seql = function(q) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  var r2 = q.parse(r.rest);
+  if(r2 instanceof Error) return r2;
+  return new Success(r.val, r2.rest);
+})}
+
+Parser.prototype.seqr = function(q) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  return q.parse(r.rest);
+})}
+
+Parser.n = function(n, re, tr) { return new Parser(function(input) {
+  if(input.n !== n) return new Error("Expected token <"+n+">", input);
+  if(re instanceof RegExp) {
+    if(!input.text.match(re)) return new Error("Expected token matching "+re, input);
+  } else {
+    tr = re;
+  }
+  log("Consumed "+input+" in n("+n+")");
+  if(tr !== undefined) {
+    if(typeof tr === "function") return new Success(tr(input), input.nextT);
+    else return new Success(tr, input.nextT);
+  }
+  else return new Success(input, input.nextT);
+})}
+
+Parser.t = function(t, tr) { return new Parser(function(input) {
+  if(t instanceof RegExp) {
+    if(!input.text.match(t)) return new Error("Expected token matching "+t, input);
+  } else {
+    if(input.text !== t) return new Error("Expected \""+t+"\"", input);
+  }
+  log("Consumed "+input+" in t("+t+")");
+  if(tr !== undefined) {
+    if(typeof tr === "function") return new Success(tr(input), input.nextT);
+    else return new Success(tr, input.nextT);
+  }
+  else return new Success(input, input.nextT);
+})}
+
+var P = Parser;
+
+
+///////////////////////////////////////////////////////////////////// Lexical Grammar
 
 var tokenRules = [
   { n: "w_lf",         r: /^(\r\n|\r|\n)/ },
@@ -108,208 +338,19 @@ var tokenRules = [
   { n: "t_qident",     r: /^`([^\\`\u0000-\u001F]|\\["'`\\btnfr])*`/ }
 ];
 
-function tokenize(text) {
-  var start = Token.newStart(), prevT = start, prev = prevT;
-  var line = 0, col = 0, offset = 0;
-  function push(t) {
-    t.line = line;
-    t.col = col;
-    t.offset = offset;
-    offset += t.text.length;
-    var lfmatches = t.text.match(/\r\n|\r|\n/g);
-    if(lfmatches) {
-      line += lfmatches.length;
-      var lastmatch = lfmatches[lfmatches.length-1];
-      col = t.text.length - t.text.lastIndexOf(lastmatch) - lastmatch.length;
-    }
-    else col += t.text.length;
-    t.prevT = prevT;
-    t.prev = prev;
-    prev.next = t;
-    prev = t;
-    if(t.c === "t" || t.c === "s") prevT = t;
-  }
-  function classify(text, rule) {
-    if(rule.classify) {
-      for(var i=0; i<rule.classify.length; i++) {
-        if(text.match(rule.classify[i].r))
-          return classify(text, rule.classify[i]);
-      }
-    }
-    return new Token(text, rule);
-  }
-  loop: while(text.length > 0) {
-    for(var i=0; i<tokenRules.length; i++) {
-      var matches = text.match(tokenRules[i].r);
-      if(matches && matches[0].length > 0) {
-        push(classify(matches[0], tokenRules[i]));
-        text = text.substring(matches[0].length);
-        continue loop;
-      }
-    }
-    start.error = "No token recognized";
-    start.rest = text;
-    break;
-  }
-  if(!start.error) push(Token.newEnd());
-  var nextT = prev, cur = nextT.prev;
-  while(true) {
-    cur.nextT = nextT;
-    if(cur.n === "s_start") break;
-    if(cur.c === "t" || cur.c === "s") nextT = cur;
-    cur = cur.prev;
-  }
-  return start;
-}
-
-
-///////////////////////////////////////////////////////////////////// Parser Combinators
-
-function Success(val, rest) { this.val = val; this.rest = rest; };
-Success.prototype.toString = function() {
-  return "Success(" + this.val + " ;; " + this.rest + ")";
-};
-
-function Error(msg, rest) { this.msg = msg; this.rest = rest; };
-Error.prototype.toString = function() {
-  return "Error(" + this.msg + ", " + this.rest + ")";
-};
-
-function tn(n, re, tr) { return function(input) {
-  if(input.n !== n) return new Error("Expected token <"+n+">", input);
-  if(re instanceof RegExp) {
-    if(!input.text.match(re)) return new Error("Expected token matching "+re, input);
-  } else {
-    tr = re;
-  }
-  log("Consumed "+input+" in tn("+n+")");
-  if(tr !== undefined) {
-    if(typeof tr === "function") return new Success(tr(input), input.nextT);
-    else return new Success(tr, input.nextT);
-  }
-  else return new Success(input, input.nextT);
-}}
-
-function tt(t, tr) { return function(input) {
-  if(t instanceof RegExp) {
-    if(!input.text.match(t)) return new Error("Expected token matching "+t, input);
-  } else {
-    if(input.text !== t) return new Error("Expected \""+t+"\"", input);
-  }
-  log("Consumed "+input+" in tt("+t+")");
-  if(tr !== undefined) {
-    if(typeof tr === "function") return new Success(tr(input), input.nextT);
-    else return new Success(tr, input.nextT);
-  }
-  else return new Success(input, input.nextT);
-}}
-
-function seq() { var parsers = arguments; return function(input) {
-  var res = [], stop = false;
-  for(var i=0; i<parsers.length; i++) {
-    var p = parsers[i];
-    if(p === ">") res = [];
-    else if(p === "<") stop = true;
-    else if(p === "<*") { stop = true; res = res[0]; }
-    else {
-      var r = parsers[i](input);
-      if(r instanceof Error) return r;
-      if(r.val !== null && !stop) res.push(r.val);
-      input = r.rest;
-    }
-  }
-  return new Success(res, input);
-}}
-
-function opt(p) { return function(input) {
-  var r = p(input);
-  return (r instanceof Error) ? new Success(null, input) : r;
-}}
-
-function choice() { var parsers = arguments; return function(input) {
-  var r;
-  for(var i=0; i<parsers.length; i++) {
-    r = parsers[i](input);
-    if(r instanceof Success) return r;
-  }
-  return r;
-}}
-
-function rep(p, min) { return function(input) {
-  var res = [];
-  while(true) {
-    var r = p(input);
-    if(r instanceof Error) {
-      if(min && res.length < min) return r;
-      else return new Success(res, input);
-    }
-    res.push(r.val);
-    input = r.rest;
-  }
-}}
-
-function chainl(p, q) { return function(input) {
-  var r = p(input);
-  if(r instanceof Error) return r;
-  input = r.rest;
-  while(true) {
-    var r2 = q(input);
-    if(r2 instanceof Error) return r;
-    var r3 = p(r2.rest);
-    if(r3 instanceof Error) return r;
-    input = r3.rest;
-    r = new Success(r2.val(r.val, r3.val), input);
-  }
-}}
-
-function tr(p, f) { return function(input) {
-  var r = p(input);
-  if(r instanceof Error) return r;
-  return new Success(f(r.val), r.rest);
-}}
-
-function trn(p, f) { return function(input) {
-  var r = p(input);
-  if(r instanceof Error) return r;
-  return new Success(new f(r.val), r.rest);
-}}
-
-function trv(p, v) { return function(input) {
-  var r = p(input);
-  if(r instanceof Error) return r;
-  return new Success(v, r.rest);
-}}
-
-function sep(p, q) { return function(input) {
-  var r = p(input);
-  if(r instanceof Error) return r;
-  input = r.rest;
-  var res = [r.val];
-  while(true) {
-    var r2 = q(input);
-    if(r2 instanceof Error) break;
-    var r3 = p(r2.rest);
-    if(r3 instanceof Error) break;
-    input = r3.rest;
-    if(r2.val !== null) res.push(r2.val);
-    if(r3.val !== null) res.push(r3.val);
-  }
-  return new Success(res, input);
-}}
-
 
 ///////////////////////////////////////////////////////////////////// Layout
 
 function insertVirtualSemicolons(input) {
-  var params = sep(choice(tn("t_ident"), tn("t_qident")), tt(","));
-  var intro = seq(opt(params), tt("=>"));
+  var params = P.n("t_ident").or(P.n("t_qident")).sep(P.t(","));
+  var intro = params.opt().seqr(P.t("=>"));
   var scopes = [];
   for(var t = input; t.n !== "s_end"; t = t.next) {
     if(t.text === "[") scopes.push(t);
     else if(t.text === "{") {
       scopes.push(t);
-      var r = intro(t.nextT);
-      var nextT = ((r instanceof Success) ? r.val[r.val.length-1] : t).nextT;
+      var r = intro.parse(t.nextT);
+      var nextT = ((r instanceof Success) ? r.val : t).nextT;
       t.scopeIndent = nextT.col;
     } else if(t.text === "]") {
       var sc = scopes.pop();
@@ -355,8 +396,9 @@ ASTNode.prototype.getNodeInfo = function() {
 ASTNode.prototype.toPrettyHTML = function() {
   var s = "<ul>";
   function f(n, depth) {
-    var i = n.getNodeInfo ? n.getNodeInfo() : [n.toString()];
-    s += (n.getNodeInfo ? "<li>" : "<li class=\"other\">") + i[0];
+    var i = (n && n.getNodeInfo) ? n.getNodeInfo() : [ n === null ? null : n.toString() ];
+    if(n && n.getNodeInfo || i[0] === null) s += "<li>" + (i[0] === null ? "<i>null</i>" : i[0]);
+    else s += "<li class=\"other\">" + i[0];
     if(i[1]) s += ": <span class=\"value\">" + i[1].replace(/</g, "&lt;") + "</span>";
     if(i[2]) {
       s += "<ul>";
@@ -370,14 +412,15 @@ ASTNode.prototype.toPrettyHTML = function() {
   return s + "</ul>";
 };
 
-function ASTSourceElements(children) {
-  this.children = children;
-}
+function ASTSourceElements(children) { this.children = children; }
 ASTSourceElements.prototype = new ASTNode("SourceElements");
 ASTSourceElements.create = function(children) {
   if(children.length === 1) return children[0];
   else return new ASTSourceElements(children);
 }
+
+function ASTArrayLiteral(children) { this.children = children; }
+ASTArrayLiteral.prototype = new ASTNode("ArrayLiteral");
 
 function ASTOp(children) {
   this.children = children;
@@ -390,9 +433,7 @@ ASTOp.create = function(children) {
 
 function ASTLiteral(nodeName) { this.nodeName = nodeName; }
 ASTLiteral.prototype = new ASTNode("Literal");
-ASTLiteral.prototype.getNodeInfo = function() {
-  return ["AST" + this.nodeName, this.value];
-}
+ASTLiteral.prototype.getNodeInfo = function() { return ["AST" + this.nodeName, this.value]; }
 
 function ASTDecimal(token) {
   this.token = token;
@@ -422,7 +463,14 @@ function ASTThis(token) {
   this.token = token;
   this.value = token.text;
 }
-ASTThis.prototype = new ASTThis("This");
+ASTThis.prototype = new ASTNode("This");
+
+function ASTUndefined(token) {
+  this.token = token;
+  if(token) this.value = token.text;
+}
+ASTUndefined.prototype = new ASTNode("Undefined");
+ASTUndefined.empty = new ASTUndefined();
 
 function ASTString(token) {
   this.token = token;
@@ -448,41 +496,44 @@ ASTIdent.prototype.getNodeInfo = function() {
 
 ///////////////////////////////////////////////////////////////////// Parser
 
-var expr = function(i) { return expr(i); }
-var assign = function(i) { return assign(i); }
+var expr = P.rec(function() { return expr; });
+var assign = P.rec(function() { return assign; });
 
-var primaryExpr = choice(
-  trn(tt("this"), ASTThis),
-  trn(tt("null"), ASTNull),
-  trn(choice(tt("true"), tt("false")), ASTBoolean),
-  trn(tn("t_ident"), ASTIdent),
-  trn(tn("t_decimal"), ASTDecimal),
-  trn(tn("t_hex"), ASTDecimal),
-  trn(tn("t_string"), ASTString),
-  trn(tn("t_mstring"), ASTMString),
-  //-- array literal,
+var elementList = assign.opt(ASTUndefined.empty).sep(P.t(",", null));
+var arrayLiteral = P.t("[").seqr(elementList).seql(P.t("]")).mapn(ASTArrayLiteral);
+
+var primaryExpr = P.choice(
+  P.t("this").mapn(ASTThis),
+  P.t("null").mapn(ASTNull),
+  P.t("true").or(P.t("false")).mapn(ASTBoolean),
+  P.n("t_ident").mapn(ASTIdent),
+  P.n("t_decimal").mapn(ASTDecimal),
+  P.n("t_hex").mapn(ASTDecimal),
+  P.n("t_string").mapn(ASTString),
+  P.n("t_mstring").mapn(ASTMString),
+  arrayLiteral,
   //-- object literal,
-  seq(tt("("), ">", expr, "<*", tt(")")) );
+  P.t("(").seqr(expr).seql(P.t(")")) );
 
-var infix9 = tr(sep(primaryExpr, tn("t_op9")), ASTOp.create);
-var infix8 = tr(sep(infix9, tn("t_op8")), ASTOp.create);
-var infix7 = tr(sep(infix8, tn("t_op7")), ASTOp.create);
-var infix6 = tr(sep(infix7, tn("t_op6")), ASTOp.create);
-var infix5 = tr(sep(infix6, tn("t_op5")), ASTOp.create);
-var infix4 = tr(sep(infix5, tn("t_op4")), ASTOp.create);
-var infix3 = tr(sep(infix4, tn("t_op3")), ASTOp.create);
-var infix2 = tr(sep(infix3, tn("t_op2")), ASTOp.create);
-var infix1 = tr(sep(infix2, tn("t_op1")), ASTOp.create);
-var cond = choice(tr(seq(infix1, tt("?"), assign, tt(":"), assign), ASTOp.create), infix1);
-var assign = tr(sep(infix1, tn("t_assignop")), ASTOp.create);
+var infix9 = primaryExpr.sep(P.n("t_op9")).map(ASTOp.create);
+var infix8 = infix9.sep(P.n("t_op8")).map(ASTOp.create);
+var infix7 = infix8.sep(P.n("t_op7")).map(ASTOp.create);
+var infix6 = infix7.sep(P.n("t_op6")).map(ASTOp.create);
+var infix5 = infix6.sep(P.n("t_op5")).map(ASTOp.create);
+var infix4 = infix5.sep(P.n("t_op4")).map(ASTOp.create);
+var infix3 = infix4.sep(P.n("t_op3")).map(ASTOp.create);
+var infix2 = infix3.sep(P.n("t_op2")).map(ASTOp.create);
+var infix1 = infix2.sep(P.n("t_op1")).map(ASTOp.create);
+var cond = P.seq(infix1, P.t("?"), assign, P.t(":"), assign).map(ASTOp.create).or(infix1);
+var assign = infix1.sep(P.n("t_assignop")).map(ASTOp.create);
 var expr = assign;
 var statement = expr; //--
-var sourceElement = statement; //-- choice(statement, definition);
-var statementSeparator = choice(tn("t_semi", null), tn("s_semi", null));
-var sourceElements = tr(seq(rep(statementSeparator, 0), ">",
-  sep(sourceElement, trv(rep(statementSeparator, 1), null)),
-  "<*", opt(rep(statementSeparator, 0))), ASTSourceElements.create);
-var program = seq(tn("s_start"), ">", sourceElements, "<*", tn("s_end"));
+var sourceElement = statement; //-- statement.or(definition);
+var statementSeparator = P.n("t_semi", null).or(P.n("s_semi", null));
+var sourceElements = statementSeparator.rep().seqr(
+  sourceElement.sep(statementSeparator.rep(1).mapv(null))).seql(
+  statementSeparator.rep().opt()).map(ASTSourceElements.create);
+var program = P.n("s_start").seqr(sourceElements).seql(P.n("s_end"));
 
 
 /**
@@ -505,7 +556,7 @@ function compile(input, opts) {
   opts = opts || {};
   var result = { errors: [] };
   log("Tokenizing input...");
-  var start = tokenize(input);
+  var start = Token.tokenize(input, tokenRules);
   if(start.error) result.errors.push(start);
   else {
     result.start = start;
@@ -515,7 +566,7 @@ function compile(input, opts) {
       if(semiInsert instanceof Error) result.errors.push(semiInsert);
       else {
         log("Parsing...");
-        var ast = program(start);
+        var ast = program.parse(start);
         if(ast instanceof Error) result.errors.push(ast);
         else {
           result.ast = ast.val;
@@ -530,9 +581,9 @@ function compile(input, opts) {
 ms = {
   log: function(msg) {},
   Token: Token,
-  tokenize: tokenize,
   Success: Success,
   Error: Error,
+  Parser: Parser,
   insertVirtualSemicolons: insertVirtualSemicolons,
   program: program,
   compile: compile
