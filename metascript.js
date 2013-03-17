@@ -147,13 +147,16 @@ function Parser(p) { this.parse = p; };
 
 Parser.rec = function(f) { return new Parser(function(i) { return f().parse(i); }); }
 
-Parser.choice = function() { var parsers = arguments; return new Parser(function(input) {
-  var r;
-  for(var i=0; i<parsers.length; i++) {
-    r = parsers[i].parse(input);
-    if(r instanceof Success) return r;
-  }
-  return r;
+Parser.n = function(n) { return new Parser(function(input) {
+  if(input.n !== n) return new Error("Expected token <"+n+">", input);
+  log("Consumed "+input+" in n("+n+")");
+  return new Success(input, input.nextT);
+})}
+
+Parser.t = function(t) { return new Parser(function(input) {
+  if(input.text !== t) return new Error("Expected \""+t+"\"", input);
+  log("Consumed "+input+" in t("+t+")");
+  return new Success(input, input.nextT);
 })}
 
 Parser.result = function(v) { return new Parser(function(input) {
@@ -162,6 +165,15 @@ Parser.result = function(v) { return new Parser(function(input) {
 
 Parser.zero = function(msg) { return new Parser(function(input) {
   return new Error(msg, input);
+})}
+
+Parser.choice = function() { var parsers = arguments; return new Parser(function(input) {
+  var r;
+  for(var i=0; i<parsers.length; i++) {
+    r = parsers[i].parse(input);
+    if(r instanceof Success) return r;
+  }
+  return r;
 })}
 
 Parser.seq = function() { var parsers = arguments; return new Parser(function(input) {
@@ -229,6 +241,21 @@ Parser.prototype.chainl = function(q) { var p = this; return new Parser(function
   }
 })}
 
+Parser.prototype.flatten = function() { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  var res = [], undefined;
+  if(r.val === null || r.val === undefined) return r;
+  for(var i=0; i<r.val.length; i++) {
+    var ch = r.val[i];
+    if(ch instanceof Array) {
+      for(var j=0; i<ch.length; j++) res.push(ch[j]);
+    }
+    else res.push(ch);
+  }
+  return new Success(res, r.rest);
+})}
+
 Parser.prototype.bind = function(f) { var p = this; return new Parser(function(input) {
   var r = p.parse(input);
   if(r instanceof Error) return r;
@@ -267,33 +294,12 @@ Parser.prototype.seqr = function(q) { var p = this; return new Parser(function(i
   return q.parse(r.rest);
 })}
 
-Parser.n = function(n, re, tr) { return new Parser(function(input) {
-  if(input.n !== n) return new Error("Expected token <"+n+">", input);
-  if(re instanceof RegExp) {
-    if(!input.text.match(re)) return new Error("Expected token matching "+re, input);
-  } else {
-    tr = re;
-  }
-  log("Consumed "+input+" in n("+n+")");
-  if(tr !== undefined) {
-    if(typeof tr === "function") return new Success(tr(input), input.nextT);
-    else return new Success(tr, input.nextT);
-  }
-  else return new Success(input, input.nextT);
-})}
-
-Parser.t = function(t, tr) { return new Parser(function(input) {
-  if(t instanceof RegExp) {
-    if(!input.text.match(t)) return new Error("Expected token matching "+t, input);
-  } else {
-    if(input.text !== t) return new Error("Expected \""+t+"\"", input);
-  }
-  log("Consumed "+input+" in t("+t+")");
-  if(tr !== undefined) {
-    if(typeof tr === "function") return new Success(tr(input), input.nextT);
-    else return new Success(tr, input.nextT);
-  }
-  else return new Success(input, input.nextT);
+Parser.prototype.seq = function(q) { var p = this; return new Parser(function(input) {
+  var r = p.parse(input);
+  if(r instanceof Error) return r;
+  var r2 = q.parse(r.rest);
+  if(r2 instanceof Error) return r2;
+  return new Success([r.val, r2.val], r2.rest);
 })}
 
 var P = Parser;
@@ -306,12 +312,14 @@ var tokenRules = [
   { n: "w_space",      r: /^\s/ },
   { n: "c_line",       r: /^\/\/.*(\r\n|\r|\n|$)/ },
   { n: "c_inline",     r: /^\/\*([^\*]|(\*[^\/]))*\*\// },
-  { n: "t_mstring",    r: /^"""(.|\r|\n)*"""/ },
+  { n: "t_mstring",    r: /^"""((?!""").|\r|\n)*"""/ },
   { n: "t_string",     r: /^"([^\\"\u0000-\u001F]|\\["'`\\btnfr])*"/ },
   { n: "t_hex",        r: /^0[xX][0-9a-fA-F]+/ },
   { n: "t_decimal",    r: /^\d+(\.\d+)?/ },
   { n: "t_dots",       r: /^\.+/ },
   { n: "t_op9",        r: /^(\/(?![\*\/])|[\:\?\+\-\*=\!&\|<>\^~%])+/, classify: [
+    { n: "t_dcolon",   r: /^\:\:$/ },
+    { n: "t_colon",    r: /^\:$/ },
     { n: "t_rdarrow",  r: /^=>$/ },
     { n: "t_larrow",   r: /^<-$/ },
     { n: "t_assignop", r: /^(=|[^<>\!=]=|[^=].+=)$/ },
@@ -370,11 +378,23 @@ function insertVirtualSemicolons(input) {
     } else if(t.n === "w_lf" && (scopes[scopes.length-1].text === "{" || scopes[scopes.length-1].n === "s_start")) {
       var indent = scopes[scopes.length-1].scopeIndent;
       var ntt = t.nextT.text;
-      if( t.nextT.n !== "s_end" && ntt !== "else" && ntt !== ";" && ntt !== "{" && ntt !== "}"
-          && t.prevT.n !== "s_start" && t.prevT.text !== ";" && t.prevT.text !== "{" && t.prevT.text !== "=>") {
-        if(t.nextT.col <= indent) {
-          log("Inserting virtual semicolon after " + t.prevT);
-          t.prevT.append(Token.newVSemi());
+      if(t.nextT.n !== "s_end" && t.prevT.n !== "s_start" && ntt !== ";" && t.prevT.text !== ";") {
+        var special = ntt == "else" || ntt == "{" || ntt == "}" || t.prevT.text == "{" || t.prevT.text == "=>";
+        if(special) {
+          var tt = t.prev;
+          while(tt !== t.prevT) {
+            if(tt.n === "w_lf" || tt.n === "c_line" || tt.n === "c_inline") {
+              special = false;
+              break;
+            }
+            tt = tt.prev;
+          }
+        }
+        if(!special) {
+          if(t.nextT.col <= indent) {
+            log("Inserting virtual semicolon after " + t.prevT);
+            t.prevT.append(Token.newVSemi());
+          }
         }
       }
     }
@@ -391,7 +411,7 @@ ASTNode.prototype.toString = function() {
   return i[0] + "(" + (i[1] || i[2]) + ")";
 }
 ASTNode.prototype.getNodeInfo = function() {
-  return ["AST" + this.nodeName, null, this.children];
+  return ["AST" + this.nodeName, this.value, this.children];
 }
 ASTNode.prototype.toPrettyHTML = function() {
   var s = "<ul>";
@@ -411,129 +431,109 @@ ASTNode.prototype.toPrettyHTML = function() {
   f(this, 0);
   return s + "</ul>";
 };
-
-function ASTSourceElements(children) { this.children = children; }
-ASTSourceElements.prototype = new ASTNode("SourceElements");
-ASTSourceElements.create = function(children) {
-  if(children.length === 1) return children[0];
-  else return new ASTSourceElements(children);
+ASTNode.withToken = function(name, parent) {
+  var cons = function(token) {
+    this.token = token;
+    if(token) this.value = token.text;
+  };
+  cons.prototype = new parent(name);
+  return cons;
 }
-
-function ASTArrayLiteral(children) { this.children = children; }
-ASTArrayLiteral.prototype = new ASTNode("ArrayLiteral");
-
-function ASTOp(children) {
-  this.children = children;
-}
-ASTOp.prototype = new ASTNode("Op");
-ASTOp.create = function(children) {
-  if(children.length === 1) return children[0];
-  else return new ASTOp(children);
+ASTNode.withChildren = function(name, parent) {
+  var cons = function(children) {
+    this.children = children;
+  };
+  cons.prototype = new parent(name);
+  cons.create = function(children) {
+    if(children.length === 1) return children[0];
+    else return new cons(children);
+  }
+  return cons;
 }
 
 function ASTLiteral(nodeName) { this.nodeName = nodeName; }
 ASTLiteral.prototype = new ASTNode("Literal");
-ASTLiteral.prototype.getNodeInfo = function() { return ["AST" + this.nodeName, this.value]; }
 
-function ASTDecimal(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTDecimal.prototype = new ASTLiteral("Decimal");
-
-function ASTHex(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTHex.prototype = new ASTLiteral("Hex");
-
-function ASTBoolean(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTBoolean.prototype = new ASTLiteral("Boolean");
-
-function ASTNull(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTNull.prototype = new ASTNull("Null");
-
-function ASTThis(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTThis.prototype = new ASTNode("This");
-
-function ASTUndefined(token) {
-  this.token = token;
-  if(token) this.value = token.text;
-}
-ASTUndefined.prototype = new ASTNode("Undefined");
+var ASTSourceElements = ASTNode.withChildren("SourceElements", ASTNode);
+var ASTArrayLiteral = ASTNode.withChildren("ArrayLiteral", ASTNode);
+var ASTOp = ASTNode.withChildren("Op", ASTNode);
+var ASTProperty = ASTNode.withChildren("Property", ASTNode);
+var ASTObjectLiteral = ASTNode.withChildren("ObjectLiteral", ASTNode);
+var ASTDecimal = ASTNode.withToken("Decimal", ASTLiteral);
+var ASTHex = ASTNode.withToken("Hex", ASTLiteral);
+var ASTBoolean = ASTNode.withToken("Boolean", ASTLiteral);
+var ASTNull = ASTNode.withToken("Null", ASTLiteral);
+var ASTThis = ASTNode.withToken("This", ASTNode);
+var ASTUndefined = ASTNode.withToken("Undefined", ASTNode);
 ASTUndefined.empty = new ASTUndefined();
-
-function ASTString(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTString.prototype = new ASTLiteral("String");
-
-function ASTMString(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTMString.prototype = new ASTLiteral("MString");
-
-function ASTIdent(token) {
-  this.token = token;
-  this.value = token.text;
-}
-ASTIdent.prototype = new ASTNode("Ident");
-ASTIdent.prototype.getNodeInfo = function() {
-  return ["AST" + this.nodeName, this.value];
-}
+var ASTString = ASTNode.withToken("String", ASTLiteral);
+var ASTMString = ASTNode.withToken("MString", ASTLiteral);
+var ASTIdent = ASTNode.withToken("Ident", ASTNode);
+var ASTIndexing = ASTNode.withChildren("Indexing", ASTNode);
+var ASTNew = ASTNode.withChildren("New", ASTNode);
+var ASTMember = ASTNode.withChildren("Member", ASTNode);
 
 
 ///////////////////////////////////////////////////////////////////// Parser
 
-var expr = P.rec(function() { return expr; });
-var assign = P.rec(function() { return assign; });
+var program = (function() {
+  var expr = P.rec(function() { return expr; });
+  var assignmentExpr = P.rec(function() { return assignmentExpr; });
+  var memberExpr = P.rec(function() { return memberExpr; });
 
-var elementList = assign.opt(ASTUndefined.empty).sep(P.t(",", null));
-var arrayLiteral = P.t("[").seqr(elementList).seql(P.t("]")).mapn(ASTArrayLiteral);
+  var semi = P.n("t_semi").or(P.n("s_semi"));
+  var semiOrComma = semi.or(P.t(","));
+  var anyString = P.n("t_string").mapn(ASTString).or(P.n("t_mstring").mapn(ASTMString));
+  var ident = P.n("t_ident").mapn(ASTIdent);
+  var anyNumber = P.n("t_decimal").mapn(ASTDecimal).or(P.n("t_hex").mapn(ASTHex));
 
-var primaryExpr = P.choice(
-  P.t("this").mapn(ASTThis),
-  P.t("null").mapn(ASTNull),
-  P.t("true").or(P.t("false")).mapn(ASTBoolean),
-  P.n("t_ident").mapn(ASTIdent),
-  P.n("t_decimal").mapn(ASTDecimal),
-  P.n("t_hex").mapn(ASTDecimal),
-  P.n("t_string").mapn(ASTString),
-  P.n("t_mstring").mapn(ASTMString),
-  arrayLiteral,
-  //-- object literal,
-  P.t("(").seqr(expr).seql(P.t(")")) );
+  var elementList = assignmentExpr.opt(ASTUndefined.empty).sep(P.t(",").mapv(null));
+  var arrayLiteral = P.t("[").seqr(elementList).seql(P.t("]")).mapn(ASTArrayLiteral);
+  var property = ident.or(anyString).or(anyNumber).seql(P.t(":")).seq(assignmentExpr).mapn(ASTProperty);
+  var propertyList = property.opt().sep(semiOrComma.mapv(null));
+  var objectLiteral = P.t("{").seqr(propertyList).seql(P.t("}")).mapn(ASTObjectLiteral);
 
-var infix9 = primaryExpr.sep(P.n("t_op9")).map(ASTOp.create);
-var infix8 = infix9.sep(P.n("t_op8")).map(ASTOp.create);
-var infix7 = infix8.sep(P.n("t_op7")).map(ASTOp.create);
-var infix6 = infix7.sep(P.n("t_op6")).map(ASTOp.create);
-var infix5 = infix6.sep(P.n("t_op5")).map(ASTOp.create);
-var infix4 = infix5.sep(P.n("t_op4")).map(ASTOp.create);
-var infix3 = infix4.sep(P.n("t_op3")).map(ASTOp.create);
-var infix2 = infix3.sep(P.n("t_op2")).map(ASTOp.create);
-var infix1 = infix2.sep(P.n("t_op1")).map(ASTOp.create);
-var cond = P.seq(infix1, P.t("?"), assign, P.t(":"), assign).map(ASTOp.create).or(infix1);
-var assign = infix1.sep(P.n("t_assignop")).map(ASTOp.create);
-var expr = assign;
-var statement = expr; //--
-var sourceElement = statement; //-- statement.or(definition);
-var statementSeparator = P.n("t_semi", null).or(P.n("s_semi", null));
-var sourceElements = statementSeparator.rep().seqr(
-  sourceElement.sep(statementSeparator.rep(1).mapv(null))).seql(
-  statementSeparator.rep().opt()).map(ASTSourceElements.create);
-var program = P.n("s_start").seqr(sourceElements).seql(P.n("s_end"));
+  var primaryExpr = P.choice(
+    P.t("this").mapn(ASTThis),
+    P.t("null").mapn(ASTNull),
+    P.t("true").or(P.t("false")).mapn(ASTBoolean),
+    ident,
+    anyNumber,
+    anyString,
+    arrayLiteral,
+    objectLiteral,
+    P.t("(").seqr(expr).seql(P.t(")")) );
+
+  var argumentList = assignmentExpr.opt(ASTUndefined.empty).sep(P.t(",").mapv(null));
+  var arguments = P.t("(").seqr(argumentList).seql(P.t(")"));
+  var indexing = P.t("[").seqr(expr).seql(P.t("]"));
+
+  var newMemberExpr = P.t("new").seqr(memberExpr.seq(arguments)).mapn(ASTNew);
+  var memberExpr = primaryExpr /*-- .or(functionExpr) */.or(newMemberExpr)
+    .seq(indexing.mapn(ASTIndexing).or(P.t(".").seqr(ident)).rep());
+
+  var infix9 = primaryExpr.sep(P.n("t_op9")).map(ASTOp.create);
+  var infix8 = infix9.sep(P.n("t_op8")).map(ASTOp.create);
+  var infix7 = infix8.sep(P.n("t_op7")).map(ASTOp.create);
+  var infix6 = infix7.sep(P.n("t_op6")).map(ASTOp.create);
+  var infix5 = infix6.sep(P.n("t_op5")).map(ASTOp.create);
+  var infix4 = infix5.sep(P.n("t_op4")).map(ASTOp.create);
+  var infix3 = infix4.sep(P.n("t_op3")).map(ASTOp.create);
+  var infix2 = infix3.sep(P.n("t_op2")).map(ASTOp.create);
+  var infix1 = infix2.sep(P.n("t_op1")).map(ASTOp.create);
+  var cond = P.seq(infix1, P.t("?"), assignmentExpr, P.t(":"), assignmentExpr).map(ASTOp.create).or(infix1);
+  var assignmentExpr = infix1.sep(P.n("t_assignop")).map(ASTOp.create);
+  var expr = assignmentExpr;
+  var statement = expr; //--
+  var sourceElement = statement; //-- statement.or(definition);
+  var statementSeparator = semi;
+  var sourceElements = statementSeparator.rep().seqr(
+    sourceElement.sep(statementSeparator.rep(1).mapv(null))).seql(
+    statementSeparator.rep().opt()).map(ASTSourceElements.create);
+  var program = P.n("s_start").seqr(sourceElements).seql(P.n("s_end"));
+
+  return program;
+})();
 
 
 /**
@@ -584,6 +584,7 @@ ms = {
   Success: Success,
   Error: Error,
   Parser: Parser,
+  tokenRules: tokenRules,
   insertVirtualSemicolons: insertVirtualSemicolons,
   program: program,
   compile: compile
